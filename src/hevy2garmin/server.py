@@ -485,7 +485,7 @@ async def dashboard(request: Request):
         if isinstance(cached_total, dict) and isinstance(cached_total.get("count"), int):
             routines_pending = max(0, cached_total["count"] - routine_stats["synced"])
     except Exception:
-        pass
+        logger.warning("Could not build routine summary for dashboard", exc_info=True)
 
     return _render(
         "dashboard.html",
@@ -1318,16 +1318,12 @@ async def routines_page(request: Request):
     fetch_error = None
     try:
         from hevy2garmin.hevy import HevyClient
-        from hevy2garmin.sync import fetch_all_routines
+        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total
 
         _db = db.get_db()
         hevy = HevyClient(api_key=config.get("hevy_api_key"))
         all_routines = fetch_all_routines(hevy)
-        # Cache the total so the dashboard can show "pending" without a Hevy call.
-        try:
-            _db.set_app_config("routines_total", {"count": len(all_routines)})
-        except Exception:
-            pass
+        _cache_routines_total(_db, len(all_routines))
         for r in all_routines:
             record = _db.get_synced_routine(r.get("id", ""))
             routines.append({
@@ -1337,8 +1333,9 @@ async def routines_page(request: Request):
                 "synced": record is not None,
                 "scheduled_date": (record or {}).get("scheduled_date"),
             })
-    except Exception as e:
-        fetch_error = str(e)
+    except Exception:
+        logger.exception("Failed to load Hevy routines")
+        fetch_error = "Could not load routines from Hevy. Check your API key and try again."
     return _render("routines.html", request=request, routines=routines, fetch_error=fetch_error)
 
 
@@ -1356,8 +1353,9 @@ async def api_routines_sync(request: Request):
 
     try:
         result = sync_routines(dry_run=False, force=force)
-    except Exception as e:
-        return HTMLResponse(f'<div class="toast toast-error">Routine sync failed: {e}</div>')
+    except Exception:
+        logger.exception("Routine sync failed")
+        return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
     finally:
         _sync_executing.release()
 
@@ -1396,8 +1394,9 @@ async def api_routine_schedule(request: Request, hevy_routine_id: str):
         result = schedule_routine(hevy_routine_id, dates)
     except ValueError as e:
         return HTMLResponse(f'<div class="toast toast-error">{e}</div>')
-    except Exception as e:
-        return HTMLResponse(f'<div class="toast toast-error">Scheduling failed: {e}</div>')
+    except Exception:
+        logger.exception("Scheduling routine %s failed", hevy_routine_id)
+        return HTMLResponse('<div class="toast toast-error">Scheduling failed. Check the logs for details.</div>')
     finally:
         _sync_executing.release()
 

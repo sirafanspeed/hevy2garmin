@@ -43,6 +43,20 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger("hevy2garmin")
 
 
+def _resolve_store() -> Any:
+    """Return the active ``Database`` singleton, or the ``db`` module facade as fallback."""
+    candidate = db.get_db() if callable(getattr(db, "get_db", None)) else None
+    return candidate if isinstance(candidate, Database) else db
+
+
+def _cache_routines_total(store: Any, count: int) -> None:
+    """Cache the routine count so the dashboard can show "pending" without a Hevy call."""
+    try:
+        store.set_app_config("routines_total", {"count": count})
+    except Exception:
+        logger.debug("Could not cache routines_total", exc_info=True)
+
+
 @dataclass
 class SyncOneResult:
     """Outcome of syncing a single Hevy workout."""
@@ -547,8 +561,7 @@ def sync(
         Dict with sync stats: synced, skipped, failed, total, unmapped.
     """
     cfg = config or load_config()
-    candidate_store = db.get_db() if callable(getattr(db, "get_db", None)) else None
-    store = candidate_store if isinstance(candidate_store, Database) else db
+    store = _resolve_store()
     hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
     garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
     garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
@@ -736,25 +749,21 @@ def sync_routines(
         Dict with stats: created, skipped, failed, scheduled, total.
     """
     cfg = config or load_config()
-    candidate_store = db.get_db() if callable(getattr(db, "get_db", None)) else None
-    store = candidate_store if isinstance(candidate_store, Database) else db
+    store = _resolve_store()
     hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
     garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
     garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
     garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
-    weight_unit = cfg.get("sync", {}).get("weight_unit", "kilogram")
+    # ``or {}`` guards against a config key present but explicitly null.
+    weight_unit = (cfg.get("sync") or {}).get("weight_unit", "kilogram")
     # Fallback rest between sets when a Hevy routine doesn't specify one, mirroring
     # the FIT timing default used for logged workouts.
-    default_rest_seconds = cfg.get("timing", {}).get("rest_between_sets_seconds", 75)
+    default_rest_seconds = (cfg.get("timing") or {}).get("rest_between_sets_seconds", 75)
 
     hevy = HevyClient(api_key=hevy_api_key)
     routines = fetch_all_routines(hevy)
     logger.info("Fetched %d routines to process", len(routines))
-    # Cache the total so the dashboard can show "pending" without a Hevy call.
-    try:
-        store.set_app_config("routines_total", {"count": len(routines)})
-    except Exception:
-        logger.debug("Could not cache routines_total", exc_info=True)
+    _cache_routines_total(store, len(routines))
 
     garmin_client = None
     if not dry_run:
@@ -819,16 +828,22 @@ def sync_routines(
                 stats["failed"] += 1
                 continue
 
-            if schedule_date:
-                schedule_workout(garmin_client, workout_id, schedule_date)
-                stats["scheduled"] += 1
+            # Recreating the workout drops any calendar entry the old one had, so
+            # re-apply a prior schedule when this run doesn't set a new one. Only an
+            # explicit schedule_date counts toward the "scheduled" stat; re-applying a
+            # stored date is a restore, not a new booking.
+            effective_schedule_date = schedule_date or (existing or {}).get("scheduled_date")
+            if effective_schedule_date:
+                schedule_workout(garmin_client, workout_id, effective_schedule_date)
+                if schedule_date:
+                    stats["scheduled"] += 1
 
             store.mark_routine_synced(
                 rid,
                 garmin_workout_id=str(workout_id),
                 title=title,
                 hevy_updated_at=updated_at,
-                scheduled_date=schedule_date,
+                scheduled_date=effective_schedule_date,
                 content_hash=content_hash,
             )
             stats[outcome] += 1
@@ -902,8 +917,7 @@ def schedule_routine(
         raise ValueError("no dates to schedule")
 
     cfg = config or load_config()
-    candidate_store = db.get_db() if callable(getattr(db, "get_db", None)) else None
-    store = candidate_store if isinstance(candidate_store, Database) else db
+    store = _resolve_store()
 
     record = store.get_synced_routine(hevy_routine_id)
     if not record or not record.get("garmin_workout_id"):

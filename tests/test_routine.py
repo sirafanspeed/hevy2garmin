@@ -307,6 +307,27 @@ class TestSyncRoutines:
         create_mock.assert_not_called()
         assert store.get_synced_routine("r1") is None
 
+    def test_resync_preserves_prior_schedule(self, tmp_path: Path) -> None:
+        # A routine synced AND scheduled, then re-synced because its content changed:
+        # recreating the Garmin workout drops its calendar entry, so the stored date
+        # must be re-applied to the new workout (a restore, not a new booking).
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, create_mock, schedule_mock, patches = self._patched(tmp_path, routines)
+        store.mark_routine_synced("r1", garmin_workout_id="555",
+                                  scheduled_date="2026-08-01", content_hash="stale-hash")
+        delete_mock = MagicMock()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", delete_mock), patches[6]:
+            result = sync_module.sync_routines()
+        assert result["updated"] == 1
+        # Restoring the old date is not counted as a new schedule.
+        assert result["scheduled"] == 0
+        # The new workout (777) is re-scheduled on the stored date...
+        schedule_mock.assert_called_once()
+        assert schedule_mock.call_args[0][1:] == (777, "2026-08-01")
+        # ...and the date is kept on the record instead of being wiped to None.
+        assert store.get_synced_routine("r1")["scheduled_date"] == "2026-08-01"
+
 
 class TestRoutineScheduleDates:
     def test_once_returns_single_date(self) -> None:
