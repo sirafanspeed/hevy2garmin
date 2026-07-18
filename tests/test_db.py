@@ -38,9 +38,80 @@ def _make_db(tmp_path):
                 cur.execute("DELETE FROM synced_workouts")
                 cur.execute("DELETE FROM sync_log")
                 cur.execute("DELETE FROM hr_cache")
+                cur.execute("DELETE FROM synced_routines")
             conn.commit()
         return db
     return SQLiteDatabase(tmp_path / "test.db")
+
+
+class TestRoutineTracking:
+    def test_not_synced_initially(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.is_routine_synced("r-unknown") is False
+        assert db.get_synced_routine("r-unknown") is None
+
+    def test_mark_then_check(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w9", title="Push",
+                               hevy_updated_at="2026-01-01T00:00:00Z")
+        assert db.is_routine_synced("r1") is True
+        record = db.get_synced_routine("r1")
+        assert record["garmin_workout_id"] == "w9"
+        assert record["title"] == "Push"
+
+    def test_stale_when_edited_since(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", hevy_updated_at="2026-01-01T00:00:00Z")
+        # Edited later on Hevy → treated as not synced (will be recreated).
+        assert db.is_routine_synced("r1", "2026-02-01T00:00:00Z") is False
+        # Unchanged timestamp → still synced.
+        assert db.is_routine_synced("r1", "2026-01-01T00:00:00Z") is True
+
+    def test_upsert_updates_record(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Old")
+        db.mark_routine_synced("r1", garmin_workout_id="w2", title="New")
+        assert db.get_synced_routine("r1")["garmin_workout_id"] == "w2"
+
+    def test_delete(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1")
+        assert db.delete_synced_routine("r1") is True
+        assert db.is_routine_synced("r1") is False
+        assert db.delete_synced_routine("r1") is False
+
+    def test_content_hash_round_trip(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="abc123")
+        assert db.get_synced_routine("r1")["content_hash"] == "abc123"
+        # Upsert updates the hash.
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="def456")
+        assert db.get_synced_routine("r1")["content_hash"] == "def456"
+
+    def test_routine_stats_empty(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.get_routine_stats() == {"synced": 0, "scheduled": 0}
+
+    def test_routine_stats_counts_synced_and_scheduled(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Push")
+        db.mark_routine_synced("r2", garmin_workout_id="w2", title="Pull", scheduled_date="2026-07-20")
+        db.mark_routine_synced("r3", garmin_workout_id="w3", title="Legs", scheduled_date="2026-07-21")
+        assert db.get_routine_stats() == {"synced": 3, "scheduled": 2}
+
+    def test_recent_synced_routines_fields_and_limit(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        for i in range(7):
+            db.mark_routine_synced(f"r{i}", garmin_workout_id=f"w{i}", title=f"Routine {i}")
+        recent = db.get_recent_synced_routines(5)
+        assert len(recent) == 5
+        sample = recent[0]
+        assert set(sample) >= {"hevy_routine_id", "title", "scheduled_date",
+                               "garmin_workout_id", "synced_at"}
+
+    def test_recent_synced_routines_empty(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.get_recent_synced_routines(5) == []
 
 
 class TestSyncTracking:

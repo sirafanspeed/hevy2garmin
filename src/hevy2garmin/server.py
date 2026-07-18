@@ -22,7 +22,7 @@ from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_p
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
-from hevy2garmin.sync import sync
+from hevy2garmin.sync import sync, sync_routines, routine_schedule_dates, schedule_routine
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -473,8 +473,25 @@ async def dashboard(request: Request):
     except Exception:
         pass
 
+    # Routine summary — all DB-backed (no Hevy call). "pending" needs the total
+    # routine count, cached by the /routines page and by routine sync.
+    routine_stats = {"synced": 0, "scheduled": 0}
+    recent_routines: list = []
+    routines_pending = None
+    try:
+        routine_stats = db.get_routine_stats()
+        recent_routines = db.get_recent_synced_routines(5)
+        cached_total = db.get_app_config("routines_total")
+        if isinstance(cached_total, dict) and isinstance(cached_total.get("count"), int):
+            routines_pending = max(0, cached_total["count"] - routine_stats["synced"])
+    except Exception:
+        logger.warning("Could not build routine summary for dashboard", exc_info=True)
+
     return _render(
         "dashboard.html",
+        routine_stats=routine_stats,
+        recent_routines=recent_routines,
+        routines_pending=routines_pending,
         synced_count=synced_count,
         matched_count=matched_count,
         terminal_count=terminal_count,
@@ -1291,6 +1308,103 @@ async def api_sync(request: Request):
     _last_sync_time = datetime.now(timezone.utc)
     _record_sync_log(result, trigger=f"manual ({scope})")
     return _render("partials/sync_result.html", result=result)
+
+
+@app.get("/routines", response_class=HTMLResponse)
+async def routines_page(request: Request):
+    """List Hevy routines and their sync status."""
+    config = load_config()
+    routines: list[dict] = []
+    fetch_error = None
+    try:
+        from hevy2garmin.hevy import HevyClient
+        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total
+
+        _db = db.get_db()
+        hevy = HevyClient(api_key=config.get("hevy_api_key"))
+        all_routines = fetch_all_routines(hevy)
+        _cache_routines_total(_db, len(all_routines))
+        for r in all_routines:
+            record = _db.get_synced_routine(r.get("id", ""))
+            routines.append({
+                "id": r.get("id", ""),
+                "title": r.get("title") or r.get("name") or "Routine",
+                "exercise_count": len(r.get("exercises", [])),
+                "synced": record is not None,
+                "scheduled_date": (record or {}).get("scheduled_date"),
+            })
+    except Exception:
+        logger.exception("Failed to load Hevy routines")
+        fetch_error = "Could not load routines from Hevy. Check your API key and try again."
+    return _render("routines.html", request=request, routines=routines, fetch_error=fetch_error)
+
+
+@app.post("/api/routines/sync", response_class=HTMLResponse)
+async def api_routines_sync(request: Request):
+    """Create Garmin planned workouts from all Hevy routines."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
+
+    form = await request.form()
+    force = form.get("force") in ("1", "true", "on")
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = sync_routines(dry_run=False, force=force)
+    except Exception:
+        logger.exception("Routine sync failed")
+        return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    msg = (
+        f"{result['created']} created, {result['updated']} updated, "
+        f"{result['skipped']} skipped, {result['failed']} failed"
+        + (f", {result['scheduled']} scheduled" if result.get("scheduled") else "")
+    )
+    cls = "toast-error" if result["failed"] else "toast-success"
+    return HTMLResponse(f'<div class="toast {cls}">Routine sync complete: {msg}</div>')
+
+
+@app.post("/api/routines/{hevy_routine_id}/schedule", response_class=HTMLResponse)
+async def api_routine_schedule(request: Request, hevy_routine_id: str):
+    """Schedule one synced routine on the Garmin calendar (once or recurring weekly)."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Scheduling disabled in demo mode.</div>')
+
+    form = await request.form()
+    mode = form.get("mode", "once")
+    try:
+        dates = routine_schedule_dates(
+            mode,
+            date=form.get("date"),
+            weekday=form.get("weekday"),
+            start_date=form.get("start_date"),
+            weeks=form.get("weeks"),
+        )
+    except (ValueError, TypeError) as e:
+        return HTMLResponse(f'<div class="toast toast-error">Invalid schedule: {e}</div>')
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = schedule_routine(hevy_routine_id, dates)
+    except ValueError as e:
+        return HTMLResponse(f'<div class="toast toast-error">{e}</div>')
+    except Exception:
+        logger.exception("Scheduling routine %s failed", hevy_routine_id)
+        return HTMLResponse('<div class="toast toast-error">Scheduling failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    n = result["scheduled"]
+    span = f" ({result['dates'][0]} → {result['dates'][-1]})" if n > 1 else f" on {result['dates'][0]}"
+    return HTMLResponse(
+        f'<div class="toast toast-success">Scheduled {n} session(s){span}.</div>'
+    )
 
 
 @app.post("/api/sync/{workout_id}", response_class=HTMLResponse)

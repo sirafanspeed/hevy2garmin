@@ -11,7 +11,7 @@ import sys
 from hevy2garmin import db
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.mapper import save_custom_mapping
-from hevy2garmin.sync import sync
+from hevy2garmin.sync import sync, sync_routines
 
 
 def _not_configured_message() -> str:
@@ -129,6 +129,46 @@ def cmd_sync(args: argparse.Namespace) -> None:
     print(f"\n✓ Sync complete: {result['synced']} synced, {result['skipped']} skipped, {result['failed']} failed")
     if result.get("unmapped"):
         print(f"  ⚠ {len(result['unmapped'])} unmapped exercises — run: hevy2garmin unmapped")
+    if result["failed"] > 0:
+        sys.exit(1)
+
+
+def cmd_sync_routines(args: argparse.Namespace) -> None:
+    """Sync Hevy routines to Garmin as planned workouts."""
+    _require_config(args)
+
+    if args.list:
+        cfg = load_config()
+        from hevy2garmin.hevy import HevyClient
+        hevy = HevyClient(api_key=args.hevy_api_key or cfg.get("hevy_api_key"))
+        # Hevy caps /v1/routines at pageSize 10 — larger values return HTTP 400.
+        page_size = min(args.limit or 10, 10)
+        for r in hevy.get_routines(page=1, page_size=page_size).get("routines", []):
+            synced = "✓" if db.get_synced_routine(r["id"]) else " "
+            n = len(r.get("exercises", []))
+            print(f"  [{synced}] {r.get('title', '?')} ({n} exercises)")
+        return
+
+    overrides = {}
+    if args.hevy_api_key:
+        overrides["hevy_api_key"] = args.hevy_api_key
+    if args.garmin_email:
+        overrides["garmin_email"] = args.garmin_email
+    if args.garmin_password:
+        overrides["garmin_password"] = args.garmin_password
+
+    result = sync_routines(
+        dry_run=args.dry_run,
+        schedule_date=args.date,
+        force=args.force,
+        **overrides,
+    )
+
+    print(
+        f"\n✓ Routine sync complete: {result['created']} created, "
+        f"{result['updated']} updated, {result['skipped']} skipped, {result['failed']} failed"
+        + (f", {result['scheduled']} scheduled" if result.get("scheduled") else "")
+    )
     if result["failed"] > 0:
         sys.exit(1)
 
@@ -331,6 +371,16 @@ def main() -> None:
     sync_parser.add_argument("--all", action="store_true", help="Sync entire history")
     sync_parser.add_argument("--dry-run", action="store_true", help="Generate FIT files without uploading")
 
+    # sync-routines
+    routines_parser = subparsers.add_parser(
+        "sync-routines", help="Sync Hevy routines to Garmin as planned workouts"
+    )
+    routines_parser.add_argument("--dry-run", action="store_true", help="Build payloads without calling Garmin")
+    routines_parser.add_argument("--force", action="store_true", help="Re-create even routines already synced (deletes & recreates)")
+    routines_parser.add_argument("--date", help="Also schedule workouts on this date (YYYY-MM-DD)")
+    routines_parser.add_argument("--list", action="store_true", help="List Hevy routines and their sync status")
+    routines_parser.add_argument("-n", "--limit", type=int, help="Number of routines to list with --list")
+
     # status
     subparsers.add_parser("status", help="Show sync status")
 
@@ -390,6 +440,7 @@ def main() -> None:
         commands = {
             "init": cmd_init,
             "sync": cmd_sync,
+            "sync-routines": cmd_sync_routines,
             "status": cmd_status,
             "list": cmd_list,
             "unmapped": cmd_unmapped,

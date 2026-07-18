@@ -104,6 +104,10 @@
         <div class="stat-value {% if pending > 0 %}amber{% endif %}" id="stat-pending">{{ pending }}</div>
         <div class="stat-label">Pending</div>
     </div>
+    <div class="stat-card">
+        <div class="stat-value blue">{{ routine_stats.synced }}</div>
+        <div class="stat-label">Routines synced</div>
+    </div>
 </div>
 
 <!-- Sync card -->
@@ -276,6 +280,41 @@
             </div>
         {% endif %}
     </div>
+</div>
+
+<!-- Routines summary -->
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <span class="card-title">Routines</span>
+        <a href="/routines" style="font-size: 12px;">Manage &rarr;</a>
+    </div>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 6px; font-size: 13px; color: var(--text-muted);">
+        <span><strong style="color: var(--text);">{{ routine_stats.synced }}</strong> synced</span>
+        <span><strong style="color: var(--text);">{{ routine_stats.scheduled }}</strong> scheduled</span>
+        {% if routines_pending is not none %}
+        <span><strong style="color: {% if routines_pending > 0 %}var(--amber){% else %}var(--text){% endif %};">{{ routines_pending }}</strong> pending</span>
+        {% endif %}
+    </div>
+    {% if recent_routines %}
+        {% for r in recent_routines %}
+        <div class="list-item" style="padding: 10px 0;">
+            <div>
+                <div style="font-weight: 600; font-size: 13px;">{{ r.title or 'Routine' }}</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
+                    {{ r.synced_at.strftime('%Y-%m-%d') if r.synced_at is not string else r.synced_at[:10] }}
+                    {% if r.scheduled_date %} · 📅 {{ r.scheduled_date }}{% endif %}
+                </div>
+            </div>
+            <span class="badge badge-success" style="font-size: 11px;">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div style="text-align: center; padding: 20px 0;">
+            <p style="color: var(--text-muted); font-size: 13px;">No routines synced yet. <a href="/routines">Sync your routines &rarr;</a></p>
+        </div>
+    {% endif %}
 </div>
 
 <!-- Pipeline visualization - full SVG diagram -->

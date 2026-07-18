@@ -16,6 +16,11 @@ venv/
 .env.*
 !.env.example
 
+# Local Garmin workout dumps from scripts/dump_garmin_workout.py (personal data)
+manual.json
+sync.json
+*.workout.json
+
 # IDE
 .idea/
 .vscode/

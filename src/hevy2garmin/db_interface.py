@@ -132,3 +132,36 @@ class Database(ABC):
     @abstractmethod
     def get_terminal_counts(self) -> dict[str, int]:
         """Return uploaded, manual, skipped, and total terminal counts."""
+
+    # ── Routine → Garmin planned-workout tracking ───────────────────────────
+    @abstractmethod
+    def get_synced_routine(self, hevy_routine_id: str) -> dict | None:
+        """Return the sync record for a Hevy routine, or None if never synced."""
+
+    @abstractmethod
+    def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
+        """True if the routine was synced and (if given) not edited on Hevy since."""
+
+    @abstractmethod
+    def mark_routine_synced(
+        self,
+        hevy_routine_id: str,
+        garmin_workout_id: str | None = None,
+        title: str = "",
+        hevy_updated_at: str | None = None,
+        scheduled_date: str | None = None,
+        content_hash: str | None = None,
+    ) -> None:
+        """Record a routine synced to a Garmin planned workout."""
+
+    @abstractmethod
+    def delete_synced_routine(self, hevy_routine_id: str) -> bool:
+        """Remove a routine sync record. Returns True if a record was deleted."""
+
+    @abstractmethod
+    def get_routine_stats(self) -> dict:
+        """Return routine sync counts: ``{"synced": int, "scheduled": int}``."""
+
+    @abstractmethod
+    def get_recent_synced_routines(self, limit: int = 5) -> list[dict]:
+        """Return recently synced routines, newest first."""

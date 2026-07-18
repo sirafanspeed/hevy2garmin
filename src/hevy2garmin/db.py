@@ -108,6 +108,21 @@ def get_recent_synced(limit: int = 10, **kw) -> list[dict]:
     return get_db().get_recent_synced(limit)
 
 
+def get_routine_stats(**kw) -> dict:
+    """Get routine sync counts: {"synced": int, "scheduled": int}."""
+    return get_db().get_routine_stats()
+
+
+def get_recent_synced_routines(limit: int = 5, **kw) -> list[dict]:
+    """Get recently synced routines, newest first."""
+    return get_db().get_recent_synced_routines(limit)
+
+
+def get_synced_routine(hevy_routine_id: str, **kw) -> dict | None:
+    """Get a single synced-routine record (used by `sync-routines --list`)."""
+    return get_db().get_synced_routine(hevy_routine_id)
+
+
 def record_sync_log(
     synced: int = 0,
     skipped: int = 0,

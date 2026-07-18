@@ -729,3 +729,68 @@ def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int
     if pair is not None:
         return (pair[0], pair[1], hevy_name)
     return (_UNKNOWN_CATEGORY, _UNKNOWN_SUBCATEGORY, hevy_name)
+
+
+# --------------------------------------------------------------------------- #
+# FIT numeric IDs  ->  Garmin Connect workout-API strings
+#
+# The Garmin /workout-service API identifies a strength step by string enums
+# (``category`` = "BENCH_PRESS", ``exerciseName`` = "BARBELL_BENCH_PRESS")
+# rather than the numeric (category, subcategory) pair used inside a FIT file.
+# Those strings are exactly the member names of the FIT SDK exercise enums that
+# fit-tool (already a dependency) ships, so we derive them instead of hand-
+# maintaining a second table.  ``ExerciseCategory`` maps the category int to its
+# name; a per-category ``*ExerciseName`` enum maps the subcategory int.
+# --------------------------------------------------------------------------- #
+
+# category int -> the fit-tool *ExerciseName enum class for its subcategories.
+# Built by turning each ExerciseCategory member name (e.g. "OLYMPIC_LIFT") into
+# the matching class name ("OlympicLiftExerciseName") — the same convention the
+# FIT SDK uses — so it stays correct if the SDK adds categories.
+def _build_category_exercise_enum() -> dict[int, type]:
+    from fit_tool.profile.profile_type import ExerciseCategory  # local import: heavy module
+    import fit_tool.profile.profile_type as _pt
+
+    mapping: dict[int, type] = {}
+    for member in ExerciseCategory:
+        if member.value in (_UNKNOWN_CATEGORY, 65535):
+            continue
+        class_name = member.name.title().replace("_", "") + "ExerciseName"
+        enum_cls = getattr(_pt, class_name, None)
+        if enum_cls is not None:
+            mapping[member.value] = enum_cls
+    return mapping
+
+
+_CATEGORY_EXERCISE_ENUM: dict[int, type] | None = None
+
+
+def fit_exercise_strings(category: int, subcategory: int) -> tuple[str | None, str | None]:
+    """Translate FIT numeric ``(category, subcategory)`` to Garmin API strings.
+
+    Returns ``(category_str, exercise_name_str)`` where each is the FIT SDK enum
+    member name (e.g. ``("BENCH_PRESS", "BARBELL_BENCH_PRESS")``). Either element
+    is ``None`` when it cannot be resolved — the sentinel ``UNKNOWN`` category, a
+    subcategory outside the enum, or an SDK gap — so callers can fall back to a
+    generic step with a custom name instead of sending an invalid enum.
+    """
+    global _CATEGORY_EXERCISE_ENUM
+    if category == _UNKNOWN_CATEGORY:
+        return (None, None)
+
+    try:
+        from fit_tool.profile.profile_type import ExerciseCategory
+        category_str = ExerciseCategory(category).name
+    except (ValueError, ImportError):
+        return (None, None)
+
+    if _CATEGORY_EXERCISE_ENUM is None:
+        _CATEGORY_EXERCISE_ENUM = _build_category_exercise_enum()
+
+    enum_cls = _CATEGORY_EXERCISE_ENUM.get(category)
+    if enum_cls is None:
+        return (category_str, None)
+    try:
+        return (category_str, enum_cls(subcategory).name)
+    except ValueError:
+        return (category_str, None)
